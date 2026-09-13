@@ -1,0 +1,19 @@
+RAG_Project/
+│
+├── app.py
+│
+├── backend/
+│   ├── ingestion.py
+│   ├── retrieval.py
+│   ├── generation.py
+│   ├── rag_pipeline.py
+│   └── config.py
+├── vector_store
+|
+├── vectorstore/
+│
+├── data/
+│
+├── requirements.txt
+│
+└── .env
