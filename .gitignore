@@ -21,9 +21,4 @@ Thumbs.db
 # Jupyter / notebooks (if any)
 .ipynb_checkpoints/
 
-# Vector store (if generated at runtime)
-vector_store
-vectorstore/
 
-# Data (if large or private; keep only sample/demo data in repo)
-data/
