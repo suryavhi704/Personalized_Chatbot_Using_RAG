@@ -9,7 +9,7 @@ load_dotenv()
 # ------------------------------
 # Paths
 # ------------------------------
-DATA_PATH = r"C:\Users\DELL\Desktop\RAG_Project\data\college.txt"
+DATA_PATH = r"data\college.txt"
 VECTOR_STORE_PATH = "vector_store"
 COLLECTION_NAME = "college_rag_collection"
 
