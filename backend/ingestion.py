@@ -1,221 +1,140 @@
-import os
-import uuid
-import chromadb
+"""
+Ingestion pipeline: loads the source text file, splits it into chunks,
+embeds each chunk, and writes it into a persistent Chroma collection.
 
-from langchain_community.document_loaders.text import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+Two things make this safe to import from a Streamlit app that reruns
+on every user interaction:
+
+1. get_embedding_manager() / get_vector_store_manager() are cached
+   with functools.lru_cache(maxsize=1), so the (expensive) embedding
+   model and the Chroma client are only created ONCE per process,
+   no matter how many times Streamlit reruns the script.
+2. add_documents() checks the collection count before writing, so
+   even if ingestion were somehow triggered twice, it's a no-op the
+   second time instead of a duplicate-write / lock conflict.
+"""
+
+from functools import lru_cache
+from pathlib import Path
+
+import chromadb
 from sentence_transformers import SentenceTransformer
+from langchain_text_splitters import CharacterTextSplitter
 
 from backend.config import (
-    DATA_PATH,
-    VECTOR_STORE_PATH,
+    DATA_FILE,
+    VECTORSTORE_DIR,
+    EMBEDDING_MODEL_NAME,
     COLLECTION_NAME,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
-    EMBEDDING_MODEL
 )
 
-# -------------------------------------------------
-# Document Loader
-# -------------------------------------------------
-def load_documents(file_path=DATA_PATH):
-
-    loader = TextLoader(file_path)
-
-    documents = loader.load()
-
-    return documents
-
-# -------------------------------------------------
-# Text Chunking
-# -------------------------------------------------
-def split_documents(
-    documents,
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP
-):
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
-    )
-
-    chunked_documents = text_splitter.split_documents(documents)
-
-    return chunked_documents
 
 # -------------------------------------------------
 # Embedding Manager
 # -------------------------------------------------
 class EmbeddingManager:
+    def __init__(self, model_name: str = EMBEDDING_MODEL_NAME):
+        print(f"Loading embedding model: {model_name}")
+        self.model = SentenceTransformer(model_name)
+        # len() of one probe embedding works across sentence-transformers
+        # versions, unlike get_sentence_embedding_dimension() which was
+        # renamed in newer releases.
+        self.dimension = len(self.model.encode(["dimension probe"])[0])
+        print(f"Embedding dimensions = {self.dimension}")
 
-    def __init__(self, model_name=EMBEDDING_MODEL):
-
-        self.model_name = model_name
-
-        print("Loading embedding model:", self.model_name)
-
-        self.model = SentenceTransformer(self.model_name)
-
-        print(
-            "Embedding dimensions =",
-            self.model.get_sentence_embedding_dimension()
-        )
-    def generate_embeddings(self, text):
-
-        embeddings = self.model.encode(
-            text,
-            show_progress_bar=True
-        )
-
-        print("Embeddings shape:", embeddings.shape)
-
+    def generate_embeddings(self, texts: list[str]):
+        embeddings = self.model.encode(texts, show_progress_bar=True)
+        print(f"Embeddings shape: {embeddings.shape}")
         return embeddings
-    
+
 
 # -------------------------------------------------
 # Vector Store Manager
 # -------------------------------------------------
-    
-
 class VectorStoreManager:
+    def __init__(self, persist_dir: Path = VECTORSTORE_DIR, collection_name: str = COLLECTION_NAME):
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=str(persist_dir))
+        self.collection = self.client.get_or_create_collection(name=collection_name)
+        print(f"Initialized vector store collection: {collection_name}")
+        print(f"Existing documents in collection: {self.collection.count()}")
 
-    def __init__(
-        self,
-        persist_directory=VECTOR_STORE_PATH,
-        collection_name=COLLECTION_NAME
-    ):
+    def add_documents(self, chunks: list[str], embeddings):
+        if self.collection.count() > 0:
+            print("Vector store already populated — skipping ingestion.")
+            return
 
-        self.persist_directory = persist_directory
-        self.collection_name = collection_name
+        ids = [f"chunk-{i}" for i in range(len(chunks))]
+        metadatas = [{"source": "college.txt", "chunk_index": i} for i in range(len(chunks))]
 
-        self.client = None
-        self.collection = None
-
-        self._initialize_store()
-
-
-    def _initialize_store(self):
-
-        os.makedirs(self.persist_directory, exist_ok=True)
-
-        self.client = chromadb.PersistentClient(
-            path=self.persist_directory
+        self.collection.add(
+            ids=ids,
+            embeddings=[e.tolist() for e in embeddings],
+            metadatas=metadatas,
+            documents=chunks,
         )
+        print(f"Added {len(chunks)} chunks to the vector store.")
 
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={
-                "description": "College chatbot RAG vector store"
-            }
-        )
-
-        print(
-            "Initialized vector store collection:",
-            self.collection_name
-        )
-
-        print(
-            "Existing documents in collection:",
-            self.collection.count()
-        )
-
-
-    def add_documents(self, documents, embeddings):
-
-        if len(documents) != len(embeddings):
-            raise ValueError(
-                "Number of documents does not match embeddings"
-            )
-
-        ids = []
-        all_metadata = []
-        documents_content = []
-        embeddings_list = []
-
-
-        for index, (doc, embedding_vector) in enumerate(
-            zip(documents, embeddings)
-        ):
-
-            doc_id = f"doc_{uuid.uuid4()}"
-
-            ids.append(doc_id)
-
-            metadata = dict(doc.metadata)
-
-            metadata["doc_index"] = index
-            metadata["content_length"] = len(doc.page_content)
-
-            all_metadata.append(metadata)
-
-            documents_content.append(doc.page_content)
-
-            embeddings_list.append(
-                embedding_vector.tolist()
-            )
-
-
-        if ids:
-
-            self.collection.add(
-                ids=ids,
-                metadatas=all_metadata,
-                documents=documents_content,
-                embeddings=embeddings_list
-            )
-
-            print(
-                "Total documents added in vector store =",
-                len(documents_content)
-            )
-
-        else:
-            print("No documents found for insertion")
-
-
-        print(
-            "Total documents in collection:",
-            self.collection.count()
+    def query(self, query_embedding, top_k: int = 4):
+        return self.collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=top_k,
         )
 
 
 # -------------------------------------------------
-# Main ingestion pipeline
+# Process-wide singletons
 # -------------------------------------------------
-def run_ingestion_pipeline():
-
-    vector_store = VectorStoreManager()
-
-
-    # Avoid duplicate insertion
-    if vector_store.collection.count() > 0:
-        print("Vector store already contains data")
-        return
+@lru_cache(maxsize=1)
+def get_embedding_manager() -> EmbeddingManager:
+    return EmbeddingManager()
 
 
-    documents = load_documents()
-
-    chunks = split_documents(documents)
-
-    print("Total chunks created:", len(chunks))
+@lru_cache(maxsize=1)
+def get_vector_store_manager() -> VectorStoreManager:
+    return VectorStoreManager()
 
 
-    embedding_manager = EmbeddingManager()
+# -------------------------------------------------
+# Data Loading + Chunking
+# -------------------------------------------------
+def load_and_chunk_document() -> list[str]:
+    if not DATA_FILE.exists():
+        raise FileNotFoundError(
+            f"Could not find source data file at: {DATA_FILE}. "
+            f"Make sure data/college.txt is committed to the repo."
+        )
 
+    text = DATA_FILE.read_text(encoding="utf-8")
 
-    texts = [doc.page_content for doc in chunks]
-
-    embedded_texts = embedding_manager.generate_embeddings(texts)
-
-
-    vector_store.add_documents(
-        chunks,
-        embedded_texts
+    splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
     )
+    chunks = splitter.split_text(text)
+    print(f"Total chunks created: {len(chunks)}")
+    return chunks
 
 
-    print("Ingestion pipeline completed successfully")
-            
-        
+# -------------------------------------------------
+# Public entrypoint
+# -------------------------------------------------
+def run_ingestion_pipeline() -> VectorStoreManager:
+    """
+    Builds (or reuses) the vector store. Safe to call on every
+    Streamlit rerun — the singleton caching above and the
+    collection-count check inside add_documents() together make
+    repeated calls a cheap no-op after the first one.
+    """
+    vector_store = get_vector_store_manager()
 
+    if vector_store.collection.count() == 0:
+        chunks = load_and_chunk_document()
+        embedding_manager = get_embedding_manager()
+        embedded_texts = embedding_manager.generate_embeddings(chunks)
+        vector_store.add_documents(chunks, embedded_texts)
+
+    return vector_store

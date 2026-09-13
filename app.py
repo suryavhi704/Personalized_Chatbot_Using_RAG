@@ -15,9 +15,20 @@ st.set_page_config(
 
 
 # -------------------------------------------------
-# Run Ingestion Once
+# Run Ingestion Once (cached across reruns)
 # -------------------------------------------------
-run_ingestion_pipeline()
+# This is the fix for the "readonly database" / "collection does not
+# exist" errors: without st.cache_resource, run_ingestion_pipeline()
+# would re-execute on every button click and every chat message,
+# since Streamlit reruns the whole script top-to-bottom each time.
+# st.cache_resource makes Streamlit run this function body only once
+# per app lifetime and reuse the same object afterwards.
+@st.cache_resource(show_spinner="Setting up knowledge base...")
+def initialize_vector_store():
+    return run_ingestion_pipeline()
+
+
+initialize_vector_store()
 
 
 # -------------------------------------------------
@@ -281,8 +292,6 @@ else:
                 response = generate_rag_response(
                     user_query
                 )
-
-                print("STREAMLIT RESPONSE =", response)
 
                 if response is None:
 

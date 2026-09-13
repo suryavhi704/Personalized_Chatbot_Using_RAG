@@ -1,137 +1,38 @@
-import re
+"""
+Generation: builds the grounded prompt and calls the GROQ LLM.
+"""
 
 from langchain_groq import ChatGroq
 
-from backend.config import (
-    GROQ_API_KEY,
-    LLM_MODEL,
-    TEMPERATURE,
-    MAX_TOKENS
-)
+from backend.config import GROQ_MODEL_NAME, get_groq_api_key
 
+PROMPT_TEMPLATE = """You are miro.ai, a helpful assistant for Techno Engineering College Banipur.
+Answer the question using ONLY the context below. If the answer is not
+contained in the context, say you don't have that information instead
+of guessing.
 
-# -------------------------------------------------
-# LLM Initialization
-# -------------------------------------------------
-llm = ChatGroq(
-    groq_api_key=GROQ_API_KEY,
-    model=LLM_MODEL,
-    temperature=TEMPERATURE,
-    max_tokens=MAX_TOKENS
-)
-
-
-# -------------------------------------------------
-# Clean Model Response
-# -------------------------------------------------
-def clean_response(text):
-
-    cleaned_text = re.sub(
-        r"<think>.*?</think>",
-        "",
-        text,
-        flags=re.DOTALL
-    )
-
-    return cleaned_text.strip()
-
-
-# -------------------------------------------------
-# Build Prompt
-# -------------------------------------------------
-def build_prompt(context, query):
-
-    prompt = f"""
-You are miro.ai, a helpful AI assistant for Techno Engineering College Banipur.
-
-Answer the user's question ONLY using the provided context.
-
-If the answer is not available in the context,
-say:
-"Sorry, I could not find relevant information."
-
-------------------------------
-CONTEXT:
+Context:
 {context}
-------------------------------
 
-USER QUERY:
-{query}
+Question:
+{question}
 
-ANSWER:
+Answer:
 """
 
-    return prompt
 
-
-# -------------------------------------------------
-# Generate Final Answer
-# -------------------------------------------------
-def generate_answer(query, retrieved_docs):
-
-    # ---------------------------------------------
-    # Build Context
-    # ---------------------------------------------
-    context = "\n\n".join(
-        [doc["document"] for doc in retrieved_docs]
-    ) if retrieved_docs else ""
-
-
-    # ---------------------------------------------
-    # Empty Context Handling
-    # ---------------------------------------------
-    if not context:
-
-        return "Sorry, I could not find relevant information."
-
-
-    # ---------------------------------------------
-    # Build Prompt
-    # ---------------------------------------------
-    prompt = build_prompt(
-        context,
-        query
+def _get_llm():
+    return ChatGroq(
+        model=GROQ_MODEL_NAME,
+        api_key=get_groq_api_key(),
+        temperature=0.2,
     )
 
 
-    # ---------------------------------------------
-    # Debug Prints
-    # ---------------------------------------------
-    print("\n========== RETRIEVED CONTEXT ==========")
-    print(context)
+def generate_answer(question: str, context_chunks: list[str]) -> str:
+    context = "\n\n".join(context_chunks) if context_chunks else "No relevant context found."
+    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
 
-    print("\n========== FINAL PROMPT ==========")
-    print(prompt)
-
-
-    # ---------------------------------------------
-    # Generate Response
-    # ---------------------------------------------
+    llm = _get_llm()
     response = llm.invoke(prompt)
-
-
-    print("\n========== RAW LLM RESPONSE ==========")
-    print(response)
-
-
-    # ---------------------------------------------
-    # Extract Content
-    # ---------------------------------------------
-    final_answer = clean_response(
-        response.content
-    )
-
-
-    print("\n========== FINAL ANSWER ==========")
-    print(final_answer)
-
-    # ---------------------------------------------
-    # Empty Response Handling
-    # ---------------------------------------------
-    if not final_answer.strip():
-
-        final_answer = (
-            "Sorry, I could not generate a response."
-        )
-
-    return final_answer
+    return response.content
